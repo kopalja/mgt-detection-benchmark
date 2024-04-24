@@ -21,11 +21,24 @@ import torch
 import gc
 import time
 import shutil
-import nvidia_smi, psutil
 from langcodes import *
 from tqdm import tqdm
+from functools import partial
 import backoff
 import openai
+
+# Install gemini API 
+if MODEL == "gemini":
+  try:
+    import vertexai
+    from vertexai.generative_models import (GenerationConfig, GenerativeModel,
+                                            HarmBlockThreshold, HarmCategory)
+  except Exception as e:
+    print(f"{e} \n Install vertex API for gemini inference: `https://cloud.google.com/vertex-ai`")
+    exit()
+
+
+                                        
 openai.organization = openai_organization
 openai.api_key = openai_api_key
 
@@ -38,6 +51,16 @@ def completions_with_backoff(**kwargs):
 @backoff.on_exception(backoff.expo, (openai.error.RateLimitError, openai.error.APIError))
 def chat_completions_with_backoff(**kwargs):
     return openai.ChatCompletion.create(**kwargs)
+    
+def gemini_predict(model, prompt, sleep: int = 2):
+  @backoff.on_exception(backoff.constant, Exception, interval=0, max_tries=5)
+  def _gemini_predict_impl():
+    time.sleep(sleep) # To not exceed googles free RPM
+    return model(prompt).text
+  try:
+    return _gemini_predict_impl()
+  except Exception as e:
+    return f"No response from gemini: {e}"
 
 model_name = MODEL.split("/")[-1]
 if os.path.isfile(DATASET.replace('.csv', f'_{model_name}.csv')):
@@ -72,6 +95,25 @@ else:
     
 if ("gpt-3.5-turbo" in MODEL) or ("text-davinci-003" in MODEL) or ("gpt-4" in MODEL):
   pass
+elif "gemini" in MODEL:
+  # Configure via: https://console.cloud.google.com/vertex-ai
+  gemini_model = "gemini-1.0-pro"
+  project_id = "mgt-social"
+  location = "us-central1"
+  vertexai.init(project=project_id, location=location)
+  config = GenerationConfig(
+      temperature=0.9,
+      candidate_count=1,
+      max_output_tokens=2048,
+  )
+  safety_config = {
+      HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+      HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+      HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+      HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+      HarmCategory.HARM_CATEGORY_UNSPECIFIED: HarmBlockThreshold.BLOCK_NONE,
+  }
+  model = partial(GenerativeModel(gemini_model).generate_content, generation_config = config, safety_settings = safety_config)
 elif "lora" in MODEL:
   config = PeftConfig.from_pretrained(MODEL)
   if "flan-ul2" in MODEL:
@@ -95,7 +137,7 @@ else:
   model = AutoModelForCausalLM.from_pretrained(MODEL, trust_remote_code=True, device_map='auto', offload_state_dict=True, max_memory={0: "20GIB", "cpu": "50GIB"}, offload_folder=offload_folder, load_in_4bit=use4bit, load_in_8bit=use8bit, torch_dtype=torch.float16, cache_dir=CACHE)
 
 generated = [""] * len(subset)
-if ("gpt-3.5-turbo" in MODEL) or ("text-davinci-003" in MODEL) or ("gpt-4" in MODEL):
+if ("gpt-3.5-turbo" in MODEL) or ("text-davinci-003" in MODEL) or ("gpt-4" in MODEL) or ("gemini" in MODEL):
   pass
 else:
   model = model.eval()
@@ -133,6 +175,8 @@ with torch.no_grad():
         result = chat_completions_with_backoff(model=MODEL, messages=[{"role": "user", "content": prompt}], max_tokens=512, top_p=0.95).choices[0].message.content
       elif ("text-davinci-003" in MODEL):
         result = completions_with_backoff(model=MODEL, prompt=prompt, max_tokens=512, top_p=0.95).choices[0].text
+      elif ("gemini" in MODEL):
+        result = gemini_predict(model, prompt)
       else:
         input_ids = tokenizer(prompt, return_tensors="pt").input_ids
         with torch.cuda.amp.autocast():

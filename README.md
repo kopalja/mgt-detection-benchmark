@@ -56,6 +56,7 @@ The MULTITuDE dataset can be downloaded from [Zenodo](https://zenodo.org/records
    - text-davinci-003
    - gpt-3.5-turbo
    - gpt-4
+   - gemini
    - alpaca-lora-30b
    - vicuna-13b
    - llama-65b
